@@ -338,16 +338,61 @@ public class v2_1click_registration {
 
 // ----------- POST-REGISTRATION FLOW -------------
             System.out.println("Кликаем 'Копировать'");
-            clickIfVisible(page, "#js-post-reg-copy-login-password");
+            Locator copyBtn = page.locator("#js-post-reg-copy-login-password");
+            if (copyBtn.count() > 0 && copyBtn.first().isVisible()) {
+                copyBtn.first().click();
+                page.waitForTimeout(1000); // подождать реакцию UI
+                // fallback, если popup не появился
+                if (page.locator("button.swal2-confirm.swal2-styled:has-text('ОК')").count() == 0) {
+                    System.out.println("Popup 'ОК' не появился, триггерим событие вручную");
+                    page.evaluate("el => el.dispatchEvent(new MouseEvent('click', { bubbles: true }))", copyBtn.first());
+                    page.waitForTimeout(1000);
+                }
+            } else {
+                throw new RuntimeException("Кнопка 'Копировать' не найдена или не видна");
+            }
             pauseMedium();
+
+            System.out.println("Закрываем всплывающее окно 'ОК', если появилось");
+            try {
+                Locator okButton = page.locator("button.swal2-confirm.swal2-styled:has-text('ОК')");
+                okButton.waitFor(new Locator.WaitForOptions().setTimeout(3000).setState(WaitForSelectorState.VISIBLE));
+                if (okButton.isVisible()) {
+                    okButton.click();
+                    System.out.println("Кнопка 'ОК' нажата ✅");
+                    pauseShort();
+                }
+            } catch (Exception ignored) {}
 
             System.out.println("Кликаем 'Сохранить в файл'");
             clickIfVisible(page, "a#account-info-button-file");
             pauseMedium();
 
+            System.out.println("Закрываем всплывающее окно 'Закрыть', если появилось");
+            try {
+                Locator closePopup = page.locator("button.identification-popup-close");
+                closePopup.waitFor(new Locator.WaitForOptions().setTimeout(3000).setState(WaitForSelectorState.VISIBLE));
+                if (closePopup.isVisible()) {
+                    closePopup.click();
+                    System.out.println("Кнопка 'Закрыть' нажата ✅");
+                    pauseShort();
+                }
+            } catch (Exception ignored) {}
+
             System.out.println("Кликаем 'Сохранить картинкой'");
             clickIfVisible(page, "a#account-info-button-image");
             pauseMedium();
+
+            System.out.println("Закрываем всплывающее окно 'Закрыть', если появилось");
+            try {
+                Locator closePopup = page.locator("button.identification-popup-close");
+                closePopup.waitFor(new Locator.WaitForOptions().setTimeout(3000).setState(WaitForSelectorState.VISIBLE));
+                if (closePopup.isVisible()) {
+                    closePopup.click();
+                    System.out.println("Кнопка 'Закрыть' нажата ✅");
+                    pauseShort();
+                }
+            } catch (Exception ignored) {}
 
             System.out.println("Кликаем 'Выслать на e-mail'");
             clickIfVisible(page, "a#form_mail_after_submit");
