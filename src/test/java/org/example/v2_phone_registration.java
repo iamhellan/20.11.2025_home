@@ -12,47 +12,42 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class v2_1click_registration {
+public class v2_phone_registration {
     static Playwright playwright;
     static Browser browser;
     static BrowserContext context;
     static Page page;
     static TelegramNotifier tg;
-    static final Path MESSAGES_SESSION = Paths.get("messages-session.json");
-    static final SimpleDateFormat DATE_TIME_FORMAT = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss");
+    private static final Path MESSAGES_SESSION =
+            Paths.get("resources", "sessions", "messages-session.json");
 
+    // --- СЕЛЕКТОРЫ КРЕСТИКОВ / КНОПОК ЗАКРЫТИЯ ПОПАПОВ ---
     static final String[] POPUP_CLOSE_SELECTORS = new String[]{
-            // --- арктик-модалки ---
+            // арктик-модалки
             "div.box-modal_close.arcticmodal-close",
             ".arcticmodal-close",
             "div.box-modal_close",
 
-            // --- overlay, который блокирует клики ---
+            // overlay / фоновые кликабельные области
             "div.v--modal-background-click",
             ".v--modal-overlay",
 
-            // --- контейнеры модалок Vue/1xbet ---
-            "div.v--modal-box",
-            "div.v--modal",
-
-            // --- общий крестик ---
-            "button[title='Закрыть']",
-
-            // --- регистрация / пост-регистрация ---
+            // окна регистрации / пост-регистрации
             "button.popup-registration__close",
 
-            // --- идентификация / привязка / бонусы ---
+            // идентификация / привязка / бонусы / переходы
             "button.identification-popup-close.identification-popup-binding__close",
             "button.identification-popup-close.identification-popup-get-bonus__close",
             "button.identification-popup-close.identification-popup-transition__close",
 
-            // --- восстановление пароля ---
+            // восстановление пароля
             "button.reset-password__close",
 
-            // --- Vue UI ---
+            // Vue UI
             "button.v--modal-close-btn",
 
-            // --- универсальные варианты ---
+            // общий случай
+            "button[title='Закрыть']",
             ".popup__close",
             ".modal__close"
     };
@@ -142,6 +137,58 @@ public class v2_1click_registration {
         }
     }
 
+    private static final int CAPTCHA_APPEAR_TIMEOUT_MS = 15_000;   // ждём, появится ли капча
+    private static final int CAPTCHA_SOLVE_TIMEOUT_MS  = 600_000;  // ждём, пока её решат (до 10 минут)
+
+    // --- ЖДЁМ РЕШЕНИЯ КАПЧИ, НО ТОЛЬКО ЕСЛИ ОНА ВООБЩЕ ПОЯВИЛАСЬ ---
+    static void waitUserSolvesCaptchaIfAppears(Page page) {
+        System.out.println("Проверяю, появляется ли капча в течение " +
+                (CAPTCHA_APPEAR_TIMEOUT_MS / 1000) + " секунд...");
+
+        boolean captchaAppeared = false;
+        try {
+            Object result = page.waitForFunction(
+                    "() => {" +
+                            "  const iframes = Array.from(document.querySelectorAll('iframe'));" +
+                            "  const hasCaptchaIframe = iframes.some(f => (f.src || '').toLowerCase().includes('captcha'));" +
+                            "  const overlays = document.querySelectorAll('.g-recaptcha, .h-captcha, .captcha, .rc-anchor');" +
+                            "  return hasCaptchaIframe || overlays.length > 0;" +
+                            "}",
+                    new Page.WaitForFunctionOptions()
+                            .setTimeout(CAPTCHA_APPEAR_TIMEOUT_MS)
+            ).jsonValue();
+
+            captchaAppeared = Boolean.TRUE.equals(result);
+        } catch (PlaywrightException e) {
+            captchaAppeared = false;
+        }
+
+        if (!captchaAppeared) {
+            System.out.println("Капча не появилась за " +
+                    (CAPTCHA_APPEAR_TIMEOUT_MS / 1000) +
+                    " секунд — считаем, что её нет и идём дальше без ожидания.");
+            return;
+        }
+
+        System.out.println("Капча обнаружена — жду, пока ты её решишь (до 10 минут)...");
+
+        try {
+            page.waitForFunction(
+                    "() => {" +
+                            "  const iframes = Array.from(document.querySelectorAll('iframe'));" +
+                            "  const hasCaptchaIframe = iframes.some(f => (f.src || '').toLowerCase().includes('captcha'));" +
+                            "  const overlays = document.querySelectorAll('.g-recaptcha, .h-captcha, .captcha, .rc-anchor');" +
+                            "  return !hasCaptchaIframe && overlays.length === 0;" +
+                            "}",
+                    new Page.WaitForFunctionOptions()
+                            .setTimeout(CAPTCHA_SOLVE_TIMEOUT_MS)
+            );
+            System.out.println("Похоже, капча решена (оверлей исчез) ✅");
+        } catch (PlaywrightException e) {
+            throw new RuntimeException("Капча не была решена в отведённое время или селекторы капчи не подошли.", e);
+        }
+    }
+
     private static String fetchCodeFromGoogleMessages(Playwright playwright, Browser browser) {
         System.out.println("Открываем Google Messages с уже сохранённой сессией");
 
@@ -169,7 +216,7 @@ public class v2_1click_registration {
         String smsText = messageNodes.nth(count - 1).innerText();
         System.out.println("Текст последнего SMS: " + smsText);
 
-        // 3. Вытаскиваем код (6–8 символов, буквы/цифры, первое слово)
+        // 3. Вытаскиваем код (4–8 символов, буквы/цифры, первое слово)
         Pattern pattern = Pattern.compile("\\b([A-Za-z0-9]{4,8})\\b");
         Matcher matcher = pattern.matcher(smsText);
         if (matcher.find()) {
@@ -229,7 +276,8 @@ public class v2_1click_registration {
                             page.evaluate("document.querySelector('" + sel + "')?.click()");
                             closedSomething = true;
                             page.waitForTimeout(250);
-                        } catch (Exception ignored) {}
+                        } catch (Exception ignored) {
+                        }
                     }
                 }
             }
@@ -254,49 +302,6 @@ public class v2_1click_registration {
         System.out.println("Форма регистрации открыта ✅");
     }
 
-    static void killPhoneBindingWindow(Page page) {
-        // крестик окна "Привязка телефона"
-        page.evaluate("document.querySelector('div.box-modal_close.arcticmodal-close')?.click()");
-
-        // альтернативный крестик (иногда появляется другой)
-        page.evaluate("document.querySelector('button[title=\"Закрыть\"]')?.click()");
-
-        // overlay, который ВСЕГДА блокирует клики!!!
-        page.evaluate("document.querySelector('div.v--modal-background-click')?.click()");
-        page.evaluate("document.querySelector('.v--modal-overlay')?.click()");
-
-        page.waitForTimeout(200);
-    }
-
-    static void clickAllOneClickTabs(Page page) {
-        System.out.println("Переключаем все вкладки 'В 1 клик' (если их несколько)...");
-        Locator allTabs = page.locator("button:has-text('В 1 клик')");
-        int count = allTabs.count();
-        System.out.println("Найдено вкладок 'В 1 клик': " + count);
-        for (int i = 0; i < count; i++) {
-            Locator tab = allTabs.nth(i);
-            if (!tab.isVisible()) {
-                System.out.println("Вкладка #" + i + " не видна, пропускаем");
-                continue;
-            }
-            try {
-                System.out.println("Кликаем по вкладке 'В 1 клик' обычным способом, индекс: " + i);
-                tab.click(new Locator.ClickOptions().setTimeout(2000));
-            } catch (Exception e1) {
-                System.out.println("Обычный клик не удался, пробуем через JS, индекс: " + i);
-                try { page.evaluate("el => el.click()", tab.elementHandle()); }
-                catch (Exception e2) {
-                    System.out.println("Клик через JS не удался, пробуем force-click, индекс: " + i);
-                    try { tab.click(new Locator.ClickOptions().setForce(true)); }
-                    catch (Exception ignored) {
-                        System.out.println("Не удалось кликнуть по вкладке 'В 1 клик', индекс: " + i);
-                    }
-                }
-            }
-            pauseShort();
-        }
-    }
-
     static String randomPromo(int len) {
         String chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         Random rnd = new Random();
@@ -311,12 +316,20 @@ public class v2_1click_registration {
         return downloads;
     }
 
-    // --- Google Messages ---
+    // --- Google Messages (через messages-session.json) ---
     static String fetchSmsCodeFromGoogleMessages() {
         System.out.println("Открываем Google Messages с сохранённой сессией...");
+        System.out.println("Использую storageState: " + MESSAGES_SESSION.toAbsolutePath());
+
+        if (!Files.exists(MESSAGES_SESSION)) {
+            throw new RuntimeException("Файл сессии не найден: " + MESSAGES_SESSION.toAbsolutePath());
+        }
+
         BrowserContext messagesContext = browser.newContext(
-                new Browser.NewContextOptions().setStorageStatePath(MESSAGES_SESSION)
+                new Browser.NewContextOptions()
+                        .setStorageStatePath(MESSAGES_SESSION)
         );
+
         Page messagesPage = messagesContext.newPage();
         messagesPage.setDefaultTimeout(20_000);
         messagesPage.navigate("https://messages.google.com/web/conversations");
@@ -336,11 +349,16 @@ public class v2_1click_registration {
         Locator nodes = messagesPage.locator("div.text-msg.msg-content div.ng-star-inserted");
         int count = nodes.count();
         String text = count > 0 ? nodes.nth(count - 1).innerText() : "";
+
         Matcher m = Pattern.compile("(?<!\\d)(\\d{4,8})(?!\\d)").matcher(text);
         String code = m.find() ? m.group(1) : null;
+
         messagesContext.close();
-        if (code == null || code.isBlank())
-            throw new RuntimeException("Код из SMS не найден");
+
+        if (code == null || code.isBlank()) {
+            throw new RuntimeException("Код из SMS не найден (text: " + text + ")");
+        }
+
         System.out.println("Код из SMS получен: " + code);
         return code;
     }
@@ -382,13 +400,16 @@ public class v2_1click_registration {
     }
 
     @Test
-    void v2_registration() throws Exception {
+    void v2_registration_by_phone() throws Exception {
         long startTime = System.currentTimeMillis();
-        String startedAt = DATE_TIME_FORMAT.format(new Date(startTime));
+        String startedAt = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss").format(new Date(startTime));
 
-        System.out.println("=== СТАРТ ТЕСТА v2_1click_registration ===");
-        tg.sendMessage("🚀 *Тест v2_1click_registration* стартовал\n" +
-                "📅 " + startedAt);
+        System.out.println("=== СТАРТ ТЕСТА v2_phone_registration ===");
+        tg.sendMessage(
+                "🕒 *Тест v2_phone_registration* стартовал\n" +
+                        "• Время старта: " + startedAt + "\n" +
+                        "• Сценарий: регистрация по номеру телефона"
+        );
 
         String sentLogin = null;
         String sentPassword = null;
@@ -406,15 +427,7 @@ public class v2_1click_registration {
             // --- ЖДЁМ МОДАЛКУ РЕГИСТРАЦИИ ---
             waitForRegistrationModal(page);
 
-            // --- ПЕРЕКЛЮЧАЕМ ТАБ 'В 1 КЛИК' ---
-            clickAllOneClickTabs(page);
-
-            System.out.println("Проверяем, что активна вкладка 'В 1 клик'...");
-            page.waitForSelector(
-                    "div#games_content.c-registration button.c-registration__tab.active:has-text('В 1 клик')",
-                    new Page.WaitForSelectorOptions().setTimeout(120_000).setState(WaitForSelectorState.VISIBLE)
-            );
-            System.out.println("Вкладка 'В 1 клик' активна ✅");
+            System.out.println("Остаёмся на форме регистрации по номеру телефона (без клика 'В 1 клик').");
 
             // --- ПРОМОКОД ---
             String promo = randomPromo(8);
@@ -434,6 +447,71 @@ public class v2_1click_registration {
             System.out.println("Пробуем выбрать бонус 'Принять' (если есть)...");
             clickIfVisible(page, "div.c-registration-bonus__item:has(.c-registration-bonus__title:has-text('Принять'))");
 
+            // --- ВВОД НОМЕРА ТЕЛЕФОНА ---
+            System.out.println("Готовим ввод номера телефона из конфига...");
+            String phone = ConfigHelper.get("phone");
+            System.out.println("Вводим номер телефона: " + phone);
+            Locator phoneInput = page.locator("input[id^='auth_phone_number_'], input.phone-input__field[type='tel']");
+            if (phoneInput.count() > 0 && phoneInput.first().isVisible()) {
+                phoneInput.first().fill(phone);
+            } else {
+                throw new RuntimeException("Поле 'Номер телефона' не найдено на форме регистрации по телефону.");
+            }
+
+            // --- ОТПРАВИТЬ SMS ---
+            System.out.println("Жмём 'Отправить sms'...");
+            Locator sendSmsBtn = page.locator("button#button_send_sms:has-text('Отправить sms')");
+            if (sendSmsBtn.count() == 0 || !sendSmsBtn.first().isVisible()) {
+                throw new RuntimeException("Кнопка 'Отправить sms' не найдена.");
+            }
+            sendSmsBtn.first().click();
+
+// --- ЖДЁМ КАПЧУ, ЕСЛИ ОНА ВООБЩЕ ПОЯВИТСЯ ---
+            waitUserSolvesCaptchaIfAppears(page);
+
+// --- ПОПАП 'ОК' ПОСЛЕ ОТПРАВКИ SMS (если есть) ---
+            System.out.println("Пробуем нажать 'ОК' в попапе после отправки SMS (если он появился)...");
+            clickIfVisible(page, "button.swal2-confirm.swal2-styled:has-text('ОК')");
+            clickIfVisible(page, "button.swal2-confirm.swal2-styled:has-text('OK')");
+
+// --- ЖДЁМ ПОЛЕ ДЛЯ КОДА ---
+            System.out.println("Жду появления поля 'Код подтверждения' (до 10 минут)...");
+            page.waitForSelector("input[placeholder='Код подтверждения']",
+                    new Page.WaitForSelectorOptions()
+                            .setTimeout(600_000)
+                            .setState(WaitForSelectorState.VISIBLE)
+            );
+            System.out.println("Поле 'Код подтверждения' появилось ✅");
+
+// --- ДАЁМ 5 СЕКУНД НА ПРИХОД НОВОГО SMS ---
+            page.waitForTimeout(5000);
+
+// --- ТЕПЕРЬ БЕРЁМ КОД ИЗ GOOGLE MESSAGES ---
+            String smsCode = fetchSmsCodeFromGoogleMessages();
+            System.out.println("Код подтверждения из SMS: " + smsCode);
+
+// --- ВВОДИМ КОД ПОДТВЕРЖДЕНИЯ ---
+            System.out.println("Вводим код подтверждения в поле 'Код подтверждения'");
+            Locator codeInput = page.locator("input#popup_registration_phone_confirmation");
+            codeInput.fill(smsCode);
+
+// --- ЖМЁМ 'ПОДТВЕРДИТЬ' ---
+            System.out.println("Жмём 'Подтвердить'");
+            Locator confirmBtn = page.locator("button.confirm_sms.reg_button_sms.c-registration__button--inside:has-text('Подтвердить')");
+            if (confirmBtn.count() == 0 || !confirmBtn.first().isVisible()) {
+                throw new RuntimeException("Кнопка 'Подтвердить' не найдена.");
+            }
+            confirmBtn.first().click();
+
+            // --- ГАЛОЧКА СОГЛАСИЯ ---
+            System.out.println("Ставим галочку согласия с правилами (agree-policy)...");
+            Locator agreeCheckbox = page.locator("label.c-registration-check__text[for^='agree-policy']");
+            if (agreeCheckbox.count() > 0 && agreeCheckbox.first().isVisible()) {
+                agreeCheckbox.first().click();
+            } else {
+                System.out.println("Галочка agree-policy не найдена или не видна, возможно уже отмечена.");
+            }
+
             // --- ЖДЁМ АКТИВАЦИЮ КНОПКИ 'ЗАРЕГИСТРИРОВАТЬСЯ' ---
             System.out.println("Ждём, пока кнопка 'Зарегистрироваться' станет активной...");
             page.waitForFunction(
@@ -445,66 +523,20 @@ public class v2_1click_registration {
             // --- НАЖИМАЕМ 'ЗАРЕГИСТРИРОВАТЬСЯ' ---
             System.out.println("Жмём 'Зарегистрироваться' (через JS)...");
 
-// Берём кнопку локатором
-            Locator registerBtn = page.locator("div.c-registration__button.submit_registration");
-
-// Если что-то нашли и видно — жмём через JS
-            if (registerBtn.count() > 0 && registerBtn.first().isVisible()) {
-                page.evaluate("el => el.click()", registerBtn.first().elementHandle());
-                System.out.println("JS-клик по кнопке 'Зарегистрироваться' выполнен.");
+            Locator regBtn = page.locator("div.c-registration__button.submit_registration:has-text('Зарегистрироваться')");
+            if (regBtn.count() > 0 && regBtn.first().isVisible()) {
+                page.evaluate("el => el.click()", regBtn.first().elementHandle());
+                System.out.println("JS-клик по 'Зарегистрироваться' выполнен.");
             } else {
-                System.out.println("Кнопка 'Зарегистрироваться' не найдена или не видна.");
+                throw new RuntimeException("Кнопка 'Зарегистрироваться' не найдена или не видна.");
             }
 
-            // --- УМНОЕ ОЖИДАНИЕ РЕЗУЛЬТАТА ПОСЛЕ "Зарегистрироваться" (до 5 минут) ---
-            System.out.println("Ждём результат: либо окно с логином/паролем, либо поле для SMS-кода (до 5 минут)...");
-            final String loginSel = "p#account-info-id";
-            final String passSel  = "p#account-info-password";
-            final String smsSel1  = "input.phone-sms-modal-content__code";
-            final String smsSel2  = "input.phone-sms-modal-code__input";
-
-            long timeoutMs = 300_000; // 5 минут
-            long waitStart = System.currentTimeMillis();
-            long lastLog = waitStart;
-
-            boolean credsReady = false;
-            boolean smsReady = false;
-
-            while ((System.currentTimeMillis() - waitStart) < timeoutMs) {
-                // 1) Модалка с логином/паролем
-                credsReady = page.locator(loginSel).isVisible() && page.locator(passSel).isVisible();
-                if (credsReady) {
-                    System.out.println("Готово: окно с логином/паролем появилось ✅");
-                    break;
-                }
-
-                // 2) Любое из полей SMS-кода
-                Locator smsLocator = page.locator(smsSel1 + ", " + smsSel2);
-                smsReady = smsLocator.count() > 0 && smsLocator.first().isVisible();
-                if (smsReady) {
-                    System.out.println("Обнаружено поле для SMS-кода — требуется подтверждение ✅");
-                    break;
-                }
-
-                // инфо-лог раз в 10 сек
-                long now = System.currentTimeMillis();
-                if (now - lastLog >= 10_000) {
-                    System.out.println("Ждём… прошло " + ((now - waitStart) / 1000) + " сек.");
-                    lastLog = now;
-                }
-
-                page.waitForTimeout(500);
-            }
-
-            if (!credsReady && !smsReady) {
-                throw new RuntimeException("За 5 минут не появилось ни окно с логин/пароль, ни поле SMS-кода.");
-            }
-
+            // --- ЖДЁМ ОКНО С ЛОГИНОМ/ПАРОЛЕМ ---
             System.out.println("Ждём появление окна 'Благодарим за регистрацию' / блок с логином и паролем...");
             page.waitForSelector("p#account-info-id",
-                    new Page.WaitForSelectorOptions().setTimeout(30_000).setState(WaitForSelectorState.VISIBLE));
+                    new Page.WaitForSelectorOptions().setTimeout(120_000).setState(WaitForSelectorState.VISIBLE));
             page.waitForSelector("p#account-info-password",
-                    new Page.WaitForSelectorOptions().setTimeout(30_000).setState(WaitForSelectorState.VISIBLE));
+                    new Page.WaitForSelectorOptions().setTimeout(120_000).setState(WaitForSelectorState.VISIBLE));
             System.out.println("Окно с логином и паролем появилось ✅");
 
             // --- ИЗВЛЕКАЕМ КРЕДЫ ---
@@ -514,6 +546,12 @@ public class v2_1click_registration {
             sentLogin = login;
             sentPassword = password;
             System.out.println("Логин: " + login + ", Пароль: " + password);
+
+            tg.sendMessage(
+                    "🔑 Регистрация по телефону завершена\n" +
+                            "• Логин: `" + login + "`\n" +
+                            "• Пароль: `" + password + "`"
+            );
 
             // --- КОПИРУЕМ КРЕДЫ ---
             System.out.println("Жмём 'Копировать логин и пароль'...");
@@ -527,8 +565,6 @@ public class v2_1click_registration {
             clickIfVisible(page, "button#account-info-button-sms");
             pauseMedium();
             closeAllKnownPopups(page, "После 'Получить по SMS' (без привязки номера)");
-            killPhoneBindingWindow(page);
-
 
             // --- СОХРАНИТЬ В ФАЙЛ ---
             System.out.println("Жмём 'Сохранить в файл'...");
@@ -577,6 +613,7 @@ public class v2_1click_registration {
             System.out.println("Переходим в Личный кабинет через кнопку в шапке...");
             clickIfVisible(page, "a.header-lk-box-link[title='Личный кабинет']");
 
+            // ждём загрузку ЛК
             page.waitForLoadState();
             System.out.println("Страница Личного кабинета загружена.");
             closeAllKnownPopups(page, "Личный кабинет после перехода");
@@ -597,27 +634,27 @@ public class v2_1click_registration {
 
             // --- ФИНАЛЬНОЕ РЕЗЮМЕ ---
             long duration = (System.currentTimeMillis() - startTime) / 1000;
-            String summary = "✅ *Тест v2_1click_registration* завершён\n" +
-                    "📅 " + startedAt + "\n" +
-                    "🕒 Длительность: " + duration + " сек.\n\n" +
-                    "🔹 Пройденные шаги:\n" +
-                    "1) Регистрация 'В 1 клик'\n" +
-                    "2) Получение логина/пароля и копирование\n" +
-                    "3) Отправка данных: SMS / файл / картинка / e-mail\n" +
-                    "4) Переход в Личный кабинет\n" +
-                    "5) Выход из аккаунта\n\n" +
-                    "🔑 Данные аккаунта:\n" +
-                    "• Логин: `" + sentLogin + "`\n" +
-                    "• Пароль: `" + sentPassword + "`\n\n" +
-                    "🌐 [1xbet.kz](https://1xbet.kz)";
+            String summary =
+                    "✅ *Тест завершён успешно:* v2_phone_registration\n" +
+                            "• Старт: " + startedAt + "\n" +
+                            "• Сценарий: регистрация по номеру телефона\n" +
+                            "• Основные шаги:\n" +
+                            "  1) Открытие сайта и формы регистрации\n" +
+                            "  2) Ввод номера и подтверждение по SMS\n" +
+                            "  3) Получение логина/пароля и доп. действия (SMS, файл, картинка, e-mail)\n" +
+                            "  4) Переход в ЛК и выход из аккаунта\n" +
+                            "• Логин: `" + sentLogin + "`\n" +
+                            "• Пароль: `" + sentPassword + "`\n" +
+                            "🕒 Длительность: " + duration + " сек.\n" +
+                            "🌐 [1xbet.kz](https://1xbet.kz)";
             tg.sendMessage(summary);
             System.out.println("=== ТЕСТ УСПЕШНО ЗАВЕРШЁН за " + duration + " сек. ===");
 
         } catch (Exception e) {
             System.out.println("❌ Ошибка во время выполнения теста: " + e);
-            String screenshotPath = ScreenshotHelper.takeScreenshot(page, "v2_1click_registration");
+            String screenshotPath = ScreenshotHelper.takeScreenshot(page, "v2_phone_registration");
             System.out.println("Скриншот сохранён по пути: " + screenshotPath);
-            tg.sendMessage("🚨 Ошибка: " + e.getMessage());
+            tg.sendMessage("🚨 Ошибка в v2_phone_registration: " + e.getMessage());
             if (screenshotPath != null) tg.sendPhoto(screenshotPath, "Скриншот ошибки");
             throw e;
         }
