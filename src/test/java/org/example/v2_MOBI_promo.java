@@ -6,7 +6,11 @@ import org.junit.jupiter.api.*;
 
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.Path;
+import java.awt.*; // для получения размера экрана
+import java.util.List;
 
 public class v2_MOBI_promo {
     static Playwright playwright;
@@ -15,21 +19,34 @@ public class v2_MOBI_promo {
     static Page mainPage;
     static TelegramNotifier tg;
 
-    private final String screenshotsFolder = "C:\\Users\\b.zhantemirov\\IdeaProjects\\1XBONUS";
+    // ВАЖНО: поменяй путь под своего пользователя/проект
+    private final String screenshotsFolder = "C:\\Users\\zhntm\\IdeaProjects\\11.11.2025\\1XBONUS\\Мобильная версия";
     private final List<String> promoNames = new ArrayList<>();
 
     @BeforeAll
     static void setUpAll() {
         playwright = Playwright.create();
+
+        // --- Берём реальное разрешение экрана и создаём окно на весь экран ---
+        Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
+        int width = (int) screenSize.getWidth();
+        int height = (int) screenSize.getHeight();
+
+        List<String> args = List.of(
+                "--start-maximized",
+                "--window-size=" + width + "," + height
+        );
+
         browser = playwright.chromium().launch(
                 new BrowserType.LaunchOptions()
                         .setHeadless(false)
-                        .setArgs(List.of("--start-maximized", "--window-size=1920,1080"))
+                        .setSlowMo(200) // 200 мс задержка между действиями
+                        .setArgs(args)
         );
 
         context = browser.newContext(
                 new Browser.NewContextOptions()
-                        .setViewportSize(null)
+                        .setViewportSize(null) // используем размер окна браузера (во весь экран)
                         .setUserAgent("Mozilla/5.0 (Linux; Android 11; SM-G998B) " +
                                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                                 "Chrome/95.0.4638.74 Mobile Safari/537.36")
@@ -57,6 +74,9 @@ public class v2_MOBI_promo {
         );
 
         try {
+            // --- Гарантируем, что папка под скрины существует ---
+            ensureScreenshotsDir();
+
             // --- Переход на мобильный сайт ---
             mainPage.navigate("https://1xbet.kz/?platform_type=mobile");
             mainPage.waitForLoadState(LoadState.DOMCONTENTLOADED);
@@ -74,17 +94,17 @@ public class v2_MOBI_promo {
                         new Page.WaitForSelectorOptions().setTimeout(8000).setState(WaitForSelectorState.ATTACHED));
 
                 mainPage.evaluate("""
-        const items = Array.from(document.querySelectorAll('div.drop-menu-list__item'));
-        const target = items.find(el => el.textContent.includes('Акции'));
-        if (target) {
-            const arrow = target.querySelector('div.drop-menu-list__arrow');
-            if (arrow) {
-                const rect = arrow.getBoundingClientRect();
-                window.scrollTo(0, rect.top - 100);
-                arrow.click();
-            }
-        }
-    """);
+                const items = Array.from(document.querySelectorAll('div.drop-menu-list__item'));
+                const target = items.find(el => el.textContent.includes('Акции'));
+                if (target) {
+                    const arrow = target.querySelector('div.drop-menu-list__arrow');
+                    if (arrow) {
+                        const rect = arrow.getBoundingClientRect();
+                        window.scrollTo(0, rect.top - 100);
+                        arrow.click();
+                    }
+                }
+                """);
 
                 mainPage.waitForSelector("div.drop-menu-list_inner",
                         new Page.WaitForSelectorOptions().setTimeout(8000).setState(WaitForSelectorState.VISIBLE));
@@ -106,7 +126,8 @@ public class v2_MOBI_promo {
             for (Locator link : promoLinks) {
                 try {
                     promoNames.add(link.innerText().trim());
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
             }
 
             // --- Перебор акций ---
@@ -114,23 +135,26 @@ public class v2_MOBI_promo {
             for (Locator link : promoLinks) {
                 String href = link.getAttribute("href");
                 if (href == null || href.isBlank()) continue;
-                String url = href.startsWith("http") ? href : "https://1xbet.kz" + href;
+
+                // Базовый URL (обычно /ru/promotions/...)
+                String baseUrl = href.startsWith("http") ? href : "https://1xbet.kz" + href;
                 String promoName = index <= promoNames.size() ? promoNames.get(index - 1) : ("Акция #" + index);
 
-                System.out.println("=== " + promoName + " → " + url);
+                System.out.println("=== " + promoName + " → " + baseUrl);
+
                 Page tab = context.newPage();
-                tab.navigate(url);
-                waitForPageLoaded(tab, url, index);
 
-                takeScreenshot(tab, promoName, "ru");
+                // --- Каждую акцию открываем ПООЧЕРЁДНО на трёх языках через URL ---
+                String[] langs = {"ru", "kz", "en"};
+                for (String lang : langs) {
+                    String langUrl = buildPromoUrlForLang(baseUrl, lang);
+                    System.out.println(" → [" + lang + "] " + langUrl);
 
-                switchLanguage(tab, "kz");
-                waitForPageLoaded(tab, url, index);
-                takeScreenshot(tab, promoName, "kz");
+                    tab.navigate(langUrl);
+                    waitForPageLoaded(tab, langUrl, index, lang);
 
-                switchLanguage(tab, "en");
-                waitForPageLoaded(tab, url, index);
-                takeScreenshot(tab, promoName, "en");
+                    takeScreenshot(tab, promoName, lang);
+                }
 
                 tab.close();
                 mainPage.bringToFront();
@@ -148,7 +172,7 @@ public class v2_MOBI_promo {
                 report.append("• ").append(name.replace("-", "\\-")).append("\n");
             }
             report.append("\n📂 *Скриншоты сохранены в:*\n`")
-                    .append(screenshotsFolder.replace("\\", "\\\\")).append("`\n")
+                    .append(getEscapedScreenshotsFolder()).append("`\n")
                     .append("🕒 *Время выполнения:* ").append(elapsed).append(" сек.\n")
                     .append("🌐 [1xbet\\.kz](https://1xbet.kz/?platform_type=mobile)");
 
@@ -160,84 +184,84 @@ public class v2_MOBI_promo {
         }
     }
 
-    private void waitForPageLoaded(Page page, String url, int index) {
+    /**
+     * Формируем URL промо под конкретный язык.
+     * Ожидаем базовый вид: https://1xbet.kz/ru/..., меняем сегмент /ru/ на /kz/ или /en/.
+     */
+    private String buildPromoUrlForLang(String baseUrl, String lang) {
+        // lang: "ru" | "kz" | "en"
+        if (!baseUrl.contains("/ru/") && !baseUrl.contains("/kz/") && !baseUrl.contains("/en/")) {
+            // если почему-то нет языкового сегмента — просто добавим /{lang}/ перед promotions
+            // пример: https://1xbet.kz/promotions/autoboom3 -> https://1xbet.kz/{lang}/promotions/autoboom3
+            return baseUrl.replace("https://1xbet.kz/", "https://1xbet.kz/" + lang + "/");
+        }
+
+        // нормальный случай: меняем существующий языковой сегмент
+        return baseUrl
+                .replace("/ru/", "/" + lang + "/")
+                .replace("/kz/", "/" + lang + "/")
+                .replace("/en/", "/" + lang + "/");
+    }
+
+    private void waitForPageLoaded(Page page, String url, int index, String lang) {
         try {
-            page.waitForLoadState(LoadState.NETWORKIDLE, new Page.WaitForLoadStateOptions().setTimeout(15000));
-            page.waitForSelector("header, footer, .bonus-detail, .promo-detail",
-                    new Page.WaitForSelectorOptions().setTimeout(10000).setState(WaitForSelectorState.VISIBLE));
-            page.waitForTimeout(1000);
-            System.out.println("✅ Страница #" + index + " загружена: " + url);
+            // Ждём, пока утихнет сеть (SPA, ajax и т.п.)
+            page.waitForLoadState(
+                    LoadState.NETWORKIDLE,
+                    new Page.WaitForLoadStateOptions().setTimeout(30_000)
+            );
+
+            // Ждём появления ключевых блоков промо/бонуса/хедера/футера
+            page.waitForSelector(
+                    "header, footer, .bonus-detail, .promo-detail",
+                    new Page.WaitForSelectorOptions()
+                            .setTimeout(15_000)
+                            .setState(WaitForSelectorState.VISIBLE)
+            );
+
+            // Небольшая дополнительная пауза, чтобы всё дорисовалось
+            page.waitForTimeout(3000);
+
+            System.out.println("✅ Страница #" + index + " [" + lang + "] загружена: " + url);
         } catch (Exception e) {
-            System.out.println("⚠ Ошибка загрузки #" + index + ": " + url);
+            System.out.println("⚠ Ошибка загрузки #" + index + " [" + lang + "]: " + url + " — " + e.getMessage());
+            // На всякий случай ещё небольшая пауза, чтобы не делать скриншот совсем пустой страницы
+            page.waitForTimeout(3000);
         }
     }
 
+
     private void takeScreenshot(Page page, String promoName, String lang) {
         try {
-            String safeName = promoName.replaceAll("[^a-zA-Z0-9а-яА-Я\\s]", "").replace(" ", "_");
+            ensureScreenshotsDir();
+
+            String safeName = promoName
+                    .replaceAll("[^a-zA-Z0-9а-яА-Я\\s]", "")
+                    .replace(" ", "_");
             String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
             String filename = String.format("%s\\%s_%s_%s.png", screenshotsFolder, safeName, lang, timestamp);
-            page.screenshot(new Page.ScreenshotOptions().setPath(Paths.get(filename)).setFullPage(true));
+
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(Paths.get(filename))
+                    .setFullPage(true));
+
             System.out.println("📸 Скриншот сохранён: " + filename);
         } catch (Exception e) {
             System.out.println("Ошибка скриншота: " + e.getMessage());
         }
     }
 
-    private void switchLanguage(Page page, String lang) {
+    private void ensureScreenshotsDir() {
         try {
-            System.out.println("🔁 Меняем язык на: " + lang);
-
-            // --- Открываем бургер ---
-            page.waitForTimeout(1000);
-            page.click("button.header__hamburger");
-            page.waitForSelector("span.drop-menu-list__link");
-            System.out.println("Бургер открыт");
-
-            // --- Открываем пункт 'Настройки' ---
-            page.evaluate("""
-            Array.from(document.querySelectorAll('span.drop-menu-list__link'))
-                .find(el => el.innerText.includes('Настройки'))?.click();
-        """);
-            page.waitForTimeout(800);
-            System.out.println("Открыли 'Настройки'");
-
-            // --- Кликаем 'Выбор языка' ---
-            page.click("div.drop-menu-list__link--sub:has-text('Выбор языка')");
-            page.waitForTimeout(1000);
-            System.out.println("Открыли 'Выбор языка'");
-
-            // --- Раскрываем список ---
-            page.click("div.multiselect__select");
-            page.waitForSelector("div.multiselect__content-wrapper ul.multiselect__content",
-                    new Page.WaitForSelectorOptions().setTimeout(5000).setState(WaitForSelectorState.VISIBLE));
-            System.out.println("Выпадающий список языков открыт");
-
-            // --- Выбираем язык ---
-            String languageText = switch (lang) {
-                case "ru" -> "Русский";
-                case "kz" -> "Қазақ тілі";
-                case "en" -> "English";
-                default -> throw new IllegalArgumentException("Неизвестный язык: " + lang);
-            };
-
-            page.evaluate("""
-            const opts = Array.from(document.querySelectorAll('.multiselect__option span'));
-            const target = opts.find(o => o.textContent.trim() === arguments[0]);
-            if (target) target.click();
-        """, languageText);
-
-            page.waitForLoadState(LoadState.NETWORKIDLE);
-            page.waitForTimeout(1500);
-            System.out.println("✅ Язык переключён: " + languageText);
-
-            // --- Закрываем бургер ---
-            page.click("button.header__hamburger");
-            page.waitForTimeout(800);
-
+            Path dir = Paths.get(screenshotsFolder);
+            Files.createDirectories(dir);
         } catch (Exception e) {
-            System.out.println("⚠ Ошибка при смене языка: " + e.getMessage());
+            System.out.println("⚠ Не удалось создать папку для скриншотов: " + e.getMessage());
         }
+    }
+
+    private String getEscapedScreenshotsFolder() {
+        return screenshotsFolder.replace("\\", "\\\\");
     }
 
     @AfterAll
