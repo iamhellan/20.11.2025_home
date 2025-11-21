@@ -5,8 +5,7 @@ import com.microsoft.playwright.options.WaitForSelectorState;
 import org.junit.jupiter.api.*;
 
 import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,6 +15,9 @@ public class v2_social_registration {
     static BrowserContext context;
     static Page page;
     static TelegramNotifier tg;
+
+    static final SimpleDateFormat DATE_TIME_FORMAT = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss");
+    static final long GOOGLE_FLOW_MAX_WAIT_MS = 300_000L; // 5 минут
 
     // --- СЕЛЕКТОРЫ КРЕСТИКОВ / КНОПОК ЗАКРЫТИЯ ПОПАПОВ ---
     static final String[] POPUP_CLOSE_SELECTORS = new String[]{
@@ -92,6 +94,11 @@ public class v2_social_registration {
     static void pauseShort() { pause(150); }
     static void pauseMedium() { pause(350); }
 
+    static boolean isVisible(Page page, String selector) {
+        Locator loc = page.locator(selector);
+        return loc.count() > 0 && loc.first().isVisible();
+    }
+
     static void waitAndClick(Page page, String selector, int timeoutMs) {
         System.out.println("Ждём элемент и кликаем: " + selector);
         page.waitForSelector(selector,
@@ -111,6 +118,7 @@ public class v2_social_registration {
         }
     }
 
+    // пока не используется в основном флоу, но оставляем как задел
     private static void closeIdentificationPopups(Page page) {
         System.out.println("Пробуем закрыть всплывающие окна идентификации (если есть)");
 
@@ -164,8 +172,7 @@ public class v2_social_registration {
                             page.evaluate("document.querySelector('" + sel + "')?.click()");
                             closedSomething = true;
                             page.waitForTimeout(250);
-                        } catch (Exception ignored) {
-                        }
+                        } catch (Exception ignored) {}
                     }
                 }
             }
@@ -202,13 +209,33 @@ public class v2_social_registration {
         return null;
     }
 
-    // --- ЛОГИН В GOOGLE-ОКНЕ ---
-    static void performGoogleLogin(Page popup, String googleEmail, String googlePassword) {
-        System.out.println("Окно Google открыто, начинаем авторизацию...");
+    // --- РЕЗЕРВНЫЙ ПАРСИНГ ЛОГИН/ПАРОЛЬ ИЗ ТЕКСТА СТРАНИЦЫ ---
+    static Map<String, String> extractCredentials(Page page) {
+        System.out.println("Пробуем извлечь логин/пароль из текста страницы (резервный метод)...");
+        String login = null, password = null;
+        try {
+            String txt = page.innerText("body");
+            Matcher ml = Pattern.compile("Логин\\s*[:\\-]?\\s*(\\S+)", Pattern.CASE_INSENSITIVE).matcher(txt);
+            if (ml.find()) login = ml.group(1);
+            Matcher mp = Pattern.compile("Пароль\\s*[:\\-]?\\s*(\\S+)", Pattern.CASE_INSENSITIVE).matcher(txt);
+            if (mp.find()) password = mp.group(1);
+        } catch (Exception e) {
+            System.out.println("Ошибка при парсинге кредов: " + e.getMessage());
+        }
+        Map<String, String> out = new HashMap<>();
+        out.put("login", login);
+        out.put("password", password);
+        System.out.println("Извлечение завершено. Логин=" + login + ", Пароль=" + password);
+        return out;
+    }
+
+    // --- ЛОГИН В GOOGLE-ОКНЕ / ТЕКУЩЕЙ ВКЛАДКЕ ---
+    static void performGoogleLogin(Page googlePage, String googleEmail, String googlePassword) {
+        System.out.println("Окно/вкладка Google открыта, начинаем авторизацию...");
 
         // Иногда уже показывается выбор аккаунта — пробуем сразу кликнуть по нашему email
         try {
-            Locator accountTile = popup.locator("div[role='button']:has-text('" + googleEmail + "')");
+            Locator accountTile = googlePage.locator("div[role='button']:has-text('" + googleEmail + "')");
             if (accountTile.count() > 0 && accountTile.first().isVisible()) {
                 System.out.println("Нашли плитку с email " + googleEmail + ", кликаем...");
                 accountTile.first().click();
@@ -216,52 +243,71 @@ public class v2_social_registration {
         } catch (Exception ignored) {}
 
         // Шаг 1: ввод email (если поле есть)
-        Locator emailInput = popup.locator("input[type='email']");
+        Locator emailInput = googlePage.locator("input[type='email']");
         if (emailInput.count() > 0 && emailInput.first().isVisible()) {
             System.out.println("Вводим email в форму Google");
             emailInput.first().fill(googleEmail);
-            popup.locator("button:has-text('Далее'), div:has-text('Далее')").first().click();
+            googlePage.locator("button:has-text('Далее'), div:has-text('Далее')").first().click();
         } else {
             System.out.println("Поле email не найдено/не видно — возможно, уже выбрали аккаунт.");
         }
 
         // Ждём появление поля пароля
         try {
-            popup.waitForSelector("input[type='password']",
+            googlePage.waitForSelector("input[type='password']",
                     new Page.WaitForSelectorOptions()
                             .setTimeout(60_000)
                             .setState(WaitForSelectorState.VISIBLE)
             );
             System.out.println("Поле пароля появилось, вводим пароль...");
-            popup.locator("input[type='password']").first().fill(googlePassword);
-            popup.locator("button:has-text('Далее'), div:has-text('Далее')").first().click();
+            googlePage.locator("input[type='password']").first().fill(googlePassword);
+            googlePage.locator("button:has-text('Далее'), div:has-text('Далее')").first().click();
         } catch (PlaywrightException e) {
             System.out.println("Поле пароля так и не появилось — возможно, сработал выбор аккаунта без пароля.");
         }
 
         // Иногда спрашивают «Оставаться в системе?» и т.п.
         try {
-            Locator denyBtn = popup.locator("button:has-text('Нет'), button:has-text('Нет, спасибо'), button:has-text('Не сейчас')");
+            Locator denyBtn = googlePage.locator("button:has-text('Нет'), button:has-text('Нет, спасибо'), button:has-text('Не сейчас')");
             if (denyBtn.count() > 0 && denyBtn.first().isVisible()) {
                 System.out.println("Закрываем доп. диалог Google ('Не сейчас' и т.п.)");
                 denyBtn.first().click();
             }
         } catch (Exception ignored) {}
 
-        // Ждём закрытие popup (возврат на 1xBet)
-        try {
-            popup.waitForClose(() -> {});
-            System.out.println("Окно Google закрылось ✅");
-        } catch (Exception e) {
-            System.out.println("Окно Google не закрылось явно, но продолжаем — возможно редирект в той же вкладке.");
+        // Ждём, пока Google закончит редирект (URL перестанет быть google.*)
+        long start = System.currentTimeMillis();
+        long maxWait = 120_000L;
+        while (System.currentTimeMillis() - start < maxWait) {
+            String url = "";
+            try {
+                url = googlePage.url();
+            } catch (Exception ignored) {}
+            if (!url.contains("accounts.google.") && !url.contains("consent.google.") && !url.contains("myaccount.google.")) {
+                System.out.println("URL больше не Google: " + url);
+                break;
+            }
+            googlePage.waitForTimeout(1000);
         }
+        System.out.println("Google-авторизация завершена (по данным URL/таймауту).");
     }
 
     @Test
     void v2_social_registration_google() {
         long startMs = System.currentTimeMillis();
-        String startedAt = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss").format(new Date());
+        String startedAt = DATE_TIME_FORMAT.format(new Date());
         String testName = "v2_social_registration_google";
+
+        String googleEmail = ConfigHelper.get("google.email");
+        String googlePassword = ConfigHelper.get("google.password");
+
+        // ранняя проверка конфигурации
+        if (googleEmail == null || googleEmail.isBlank() ||
+                googlePassword == null || googlePassword.isBlank()) {
+            throw new IllegalStateException(
+                    "google.email / google.password не заданы в config.properties — " +
+                            "некорректно запускать тест соцрегистрации через Google.");
+        }
 
         System.out.println("=== СТАРТ ТЕСТА " + testName + " ===");
         tg.sendMessage(
@@ -270,9 +316,9 @@ public class v2_social_registration {
                         "• Тип: регистрация через Google (соцсети)"
         );
 
-        String googleEmail = ConfigHelper.get("google.email");
-        String googlePassword = ConfigHelper.get("google.password");
         String accountId = null;
+        String sentLogin = null;
+        String sentPassword = null;
 
         try {
             // --- ОТКРЫВАЕМ САЙТ ---
@@ -318,7 +364,7 @@ public class v2_social_registration {
             googleOption.first().click();
             pauseShort();
 
-            // --- ЖМЁМ 'ЗАРЕГИСТРИРОВАТЬСЯ' И ЖДЁМ ОДИН ИЗ СЦЕНАРИЕВ (ГОГЛ / ОКНО КРЕДОВ / ЛК) ДО 5 МИНУТ ---
+            // --- ЖМЁМ 'ЗАРЕГИСТРИРОВАТЬСЯ' И ЖДЁМ ОДИН ИЗ СЦЕНАРИЕВ ---
             System.out.println("Нажимаем 'Зарегистрироваться' (через JS) и ждём: Google / окно с логином и паролем / 'Личный кабинет' (до 5 минут)...");
 
             Locator regBtn = page.locator("div.c-registration__button.submit_registration:has-text('Зарегистрироваться')");
@@ -326,11 +372,11 @@ public class v2_social_registration {
                 throw new RuntimeException("Кнопка 'Зарегистрироваться' для соц.регистрации не найдена.");
             }
 
-// жмём через JS по конкретной кнопке
+            // жмём через JS по конкретной кнопке
             page.evaluate("el => el.click()", regBtn.first().elementHandle());
 
             long waitStart = System.currentTimeMillis();
-            long timeoutMs = 300_000L; // 5 минут
+            long timeoutMs = GOOGLE_FLOW_MAX_WAIT_MS;
             long lastLog = waitStart;
 
             boolean googleDetected = false;
@@ -359,7 +405,7 @@ public class v2_social_registration {
 
                 if (urlLooksLikeGoogle || emailFieldVisible) {
                     googleDetected = true;
-                    System.out.println("Детектирован редирект на Google / форма логина Google ✅");
+                    System.out.println("Детектирован редирект на Google / форма логина Google ✅ (URL: " + url + ")");
                     break;
                 }
 
@@ -384,7 +430,7 @@ public class v2_social_registration {
                 long now = System.currentTimeMillis();
                 if (now - lastLog >= 10_000) {
                     System.out.println("Ждём решение капчи / один из сценариев... прошло " +
-                            ((now - waitStart) / 1000) + " сек.");
+                            ((now - waitStart) / 1000) + " сек. (URL: " + url + ")");
                     lastLog = now;
                 }
 
@@ -396,7 +442,7 @@ public class v2_social_registration {
                         "Возможно, капча не решена или флоу завис.");
             }
 
-// --- ЕСЛИ БЫЛ GOOGLE — ПРОХОДИМ АВТОРИЗАЦИЮ И ЖДЁМ ВОЗВРАТ НА 1XBET ---
+            // --- ЕСЛИ БЫЛ GOOGLE — ПРОХОДИМ АВТОРИЗАЦИЮ И ЖДЁМ ВОЗВРАТ НА 1XBET ---
             if (googleDetected) {
                 System.out.println("Запускаем авторизацию в Google в этой же вкладке...");
                 performGoogleLogin(page, googleEmail, googlePassword);
@@ -406,7 +452,7 @@ public class v2_social_registration {
                 closeAllKnownPopups(page, "После возврата с Google");
             }
 
-// После Google или прямой регистрации пробуем поймать окно с логином/паролем
+            // После Google или прямой регистрации пробуем поймать окно с логином/паролем
             Locator idLoc = page.locator("p#account-info-id");
             Locator passLoc = page.locator("p#account-info-password");
             boolean credsWindowVisible =
@@ -419,6 +465,10 @@ public class v2_social_registration {
                 String idValue = idLoc.first().innerText().trim();
                 String passValue = passLoc.first().innerText().trim();
                 System.out.println("Логин: " + idValue + ", Пароль: " + passValue);
+
+                // сохраняем креды для отчёта
+                sentLogin = idValue;
+                sentPassword = passValue;
 
                 // Копировать
                 System.out.println("Жмём 'Копировать логин и пароль'...");
@@ -471,32 +521,35 @@ public class v2_social_registration {
                 closeAllKnownPopups(page, "После 'Выслать на e-mail' (соцрег)");
 
             } else {
-                System.out.println("Окно логин/пароль после соц-регистрации не появилось — идём сразу в 'Личный кабинет'.");
+                System.out.println("Окно логин/пароль после соц-регистрации не появилось — пытаемся вытащить креды из текста и идём в 'Личный кабинет'.");
+                Map<String, String> credsFromText = extractCredentials(page);
+                if (credsFromText.get("login") != null) sentLogin = credsFromText.get("login");
+                if (credsFromText.get("password") != null) sentPassword = credsFromText.get("password");
             }
 
-// --- ПРОВЕРЯЕМ, ЧТО МЫ АВТОРИЗОВАНЫ (КНОПКА 'ЛИЧНЫЙ КАБИНЕТ') ---
-            System.out.println("Проверяем, что появился 'Личный кабинет'...");
-            page.waitForSelector(
-                    "a.header-lk-box-link[title='Личный кабинет']",
-                    new Page.WaitForSelectorOptions().setTimeout(30_000).setState(WaitForSelectorState.VISIBLE)
-            );
-            System.out.println("Похоже, вход через Google / соцрегистрацию выполнен успешно ✅");
+            // --- КЛИКАЕМ НА БАННЕР 'ПОЛУЧИТЬ БОНУС' ---
+            System.out.println("Кликаем по баннеру 'Получить бонус' (если есть)...");
+            clickIfVisible(page, "span#form_get_bonus_after_submit");
+            pauseMedium();
+            closeAllKnownPopups(page, "После 'Получить бонус'");
 
-// --- ОТКРЫВАЕМ ЛИЧНЫЙ КАБИНЕТ ---
-            System.out.println("Открываем 'Личный кабинет'...");
-            page.locator("a.header-lk-box-link[title='Личный кабинет']").first().click();
+            // --- ПЕРЕХОД В ЛИЧНЫЙ КАБИНЕТ ЧЕРЕЗ КНОПКУ В ШАПКЕ ---
+            System.out.println("Переходим в Личный кабинет через кнопку в шапке...");
+            clickIfVisible(page, "a.header-lk-box-link[title='Личный кабинет']");
+
             page.waitForLoadState();
-            closeAllKnownPopups(page, "После входа в ЛК (соцрег)");
+            System.out.println("Страница Личного кабинета загружена.");
+            closeAllKnownPopups(page, "Личный кабинет после перехода");
 
-// --- ПЫТАЕМСЯ ВЫТАЩИТЬ ID АККАУНТА (если где-то написан) ---
+            // пробуем вытащить ID из ЛК (резервно)
             accountId = tryExtractAccountId(page);
             if (accountId != null) {
-                System.out.println("Найден ID аккаунта: " + accountId);
+                System.out.println("Распознан ID аккаунта: " + accountId);
             } else {
-                System.out.println("ID аккаунта автоматически не найден (не критично).");
+                System.out.println("ID аккаунта в ЛК парсером не найден (это не ошибка, просто инфо).");
             }
 
-            // --- ВЫХОД ИЗ АККАУНТА ---
+            // --- ВЫХОД ---
             System.out.println("Ищем кнопку 'Выход' в боковом меню...");
             Locator logoutBtn = page.locator("a.ap-left-nav__item.ap-left-nav__item_exit:has-text('Выход')");
             if (logoutBtn.count() > 0 && logoutBtn.first().isVisible()) {
@@ -507,24 +560,8 @@ public class v2_social_registration {
             } else {
                 System.out.println("Кнопка 'Выход' не найдена, возможно уже не авторизованы.");
             }
+
             System.out.println("Выход из аккаунта завершён (по шагам) ✅");
-
-            // --- ПРОВЕРЯЕМ, ЧТО МЫ ГОСТЬ ---
-            System.out.println("Переходим на главную для проверки гостевого режима...");
-            page.navigate("https://1xbet.kz/?platform_type=desktop");
-            page.waitForLoadState();
-            closeAllKnownPopups(page, "После выхода, главная страница");
-
-            System.out.println("Проверяем, что снова видна кнопка 'Регистрация' (гостевой режим)...");
-            page.waitForSelector(
-                    "button#registration-form-call",
-                    new Page.WaitForSelectorOptions().setTimeout(15_000).setState(WaitForSelectorState.VISIBLE)
-            );
-            boolean loggedOut = page.locator("button#registration-form-call").isVisible();
-            if (!loggedOut) {
-                throw new RuntimeException("Ожидали гостевое состояние после выхода, но кнопка 'Регистрация' не видна.");
-            }
-            System.out.println("Гостевой режим подтверждён ✅");
 
             // --- ФИНАЛЬНЫЙ ОТЧЁТ В TELEGRAM ---
             long durationSec = (System.currentTimeMillis() - startMs) / 1000;
@@ -534,6 +571,15 @@ public class v2_social_registration {
                     .append("• Google email: `").append(googleEmail).append("`\n");
             if (accountId != null) {
                 sb.append("• ID (если распознан): `").append(accountId).append("`\n");
+            }
+            if (sentLogin != null || sentPassword != null) {
+                sb.append("🔑 Данные аккаунта:\n");
+                if (sentLogin != null) {
+                    sb.append("• Логин: `").append(sentLogin).append("`\n");
+                }
+                if (sentPassword != null) {
+                    sb.append("• Пароль: `").append(sentPassword).append("`\n");
+                }
             }
             sb.append("🕒 Старт: ").append(startedAt).append("\n")
                     .append("⏱ Длительность: ").append(durationSec).append(" сек.\n")

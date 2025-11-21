@@ -466,6 +466,8 @@ public class v2_phone_registration {
             }
             sendSmsBtn.first().click();
 
+            page.waitForTimeout(60000);
+
 // --- ЖДЁМ КАПЧУ, ЕСЛИ ОНА ВООБЩЕ ПОЯВИТСЯ ---
             waitUserSolvesCaptchaIfAppears(page);
 
